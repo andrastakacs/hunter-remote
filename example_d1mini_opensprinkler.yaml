@@ -1,0 +1,239 @@
+substitutions:
+  device_name: "D1 Mini"
+esphome:
+  name: d1mini
+  on_boot:
+    priority: 100
+    then:
+      - component.update: hunter_status
+
+
+esp8266:
+  board: d1_mini
+
+logger:
+
+globals:
+  - id: hunter_multiplier_global
+    type: float
+    initial_value: '1.0'
+    restore_value: no
+
+api:
+
+ota:
+  platform: esphome
+  password: ""
+
+
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "${device_name} Fallback Hotspot"
+
+captive_portal:
+
+external_components:
+  - source: github://andrastakacs/hunter-remote@main
+    components: [hunter_remote]
+hunter_remote:
+  id: hunterremote
+  pin: D0
+#D0 - Hunter Roam
+#3.3V - Hunter AC PIN
+
+sensor:
+  - platform: template
+    id: hunter_active_valve_percent
+    name: "Hunter active valve status"
+    entity_category: diagnostic
+    unit_of_measurement: "%"
+    icon: mdi:label-percent-outline
+    update_interval: never # updated from hunter_status
+  - platform: template
+    id: hunter_current_program_percent
+    name: "Hunter current operation status"
+    entity_category: diagnostic
+    unit_of_measurement: "%"
+    icon: mdi:label-percent
+    update_interval: never # updated from hunter_status
+
+switch:
+  - platform: template
+    id: hunter_zone_1
+    optimistic: true
+    turn_on_action:
+      - script.execute: 
+          id: run_zone
+          my_zone_id: 1
+    turn_off_action:
+      - script.execute: 
+          id: stop_zone
+          my_zone_id: 1
+  - platform: template
+    id: hunter_zone_2
+    optimistic: true
+    turn_on_action:
+      - script.execute: 
+          id: run_zone
+          my_zone_id: 2
+    turn_off_action:
+      - script.execute: 
+          id: stop_zone
+          my_zone_id: 2
+
+button:
+  - platform: template
+    name: "Hunter Pause/Resume"
+    icon: mdi:play-pause
+    on_press:
+      - if:
+          condition:
+            lambda: !lambda 'return id(hunter_ctrlr).controller_state() > 0;'
+          then:
+            - sprinkler.pause: hunter_ctrlr
+          else:
+            - sprinkler.resume: hunter_ctrlr
+
+sprinkler:
+  - id: hunter_ctrlr
+    main_switch: 
+      name: "Hunter Main Switch"
+      id: hunter_main_switch
+      icon: mdi:sprinkler-variant
+      on_turn_off:
+        - component.update: hunter_status
+    auto_advance_switch: 
+      name: "Hunter Auto Advance"
+      icon: mdi:fast-forward
+    reverse_switch:
+      name: "Hunter Reverse Order"
+      icon: mdi:keyboard-tab-reverse
+      entity_category: config
+    valve_open_delay: 5s
+    multiplier_number:
+      name: "Hunter multiplier"
+      id: hunter_multiplier
+      icon: mdi:multiplication
+      entity_category: diagnostic
+      initial_value: 1.0
+      min_value: 0.0
+      max_value: 4.0
+    valves:
+      - valve_switch:
+          name: "Zone 1"
+          icon: mdi:numeric-1-circle-outline
+        run_duration_number: 
+          id: zone_1_duration
+          name: "Zone 1 duration"
+          icon: mdi:timer-cog
+          unit_of_measurement: min
+          min_value: 0
+          max_value: 60
+          step: 1
+          initial_value: 8
+          on_value:
+            - then:
+                - lambda: |-
+                      x==0 ? id(hunter_ctrlr).enable_switch(0)->turn_off():id(hunter_ctrlr).enable_switch(0)->turn_on();
+        enable_switch:
+          name: "Zone 1 Enabled"
+          icon: mdi:sprinkler
+          entity_category: config
+        valve_switch_id: hunter_zone_1
+      - valve_switch:
+          name: "Zone 2"
+          icon: mdi:numeric-2-circle-outline
+        run_duration_number: 
+          id: zone_2_duration
+          name: "Zone 2 duration"
+          icon: mdi:timer-cog
+          unit_of_measurement: min
+          min_value: 0
+          max_value: 60
+          step: 1
+          initial_value: 10
+          on_value:
+            - then:
+              - lambda: |-
+                  x==0 ? id(hunter_ctrlr).enable_switch(1)->turn_off() : id(hunter_ctrlr).enable_switch(1)->turn_on();
+        valve_switch_id: hunter_zone_2
+        enable_switch:
+          name: "Zone 2 Enabled"
+          id: zone_2_enabled
+          icon: mdi:sprinkler
+          entity_category: config
+
+text_sensor:
+  - platform: template
+    name: "Hunter Status"
+    id: hunter_status
+    icon: mdi:sprinkler-variant
+    entity_category: "diagnostic"
+    lambda: |-
+        char text[100]="";
+        float av_perc=0, c_perc=0;
+        const char * states[]={"Idle","Starting","Active","Stopping","Bypass"};
+        int hst_state=id(hunter_ctrlr).controller_state();
+        if (hst_state>0) {
+            int vnr,secs,dur,c_op_tot,c_op_rem;
+            vnr = id(hunter_ctrlr).active_valve().value_or(-1);
+            secs = id(hunter_ctrlr).time_remaining_active_valve().value_or(1);
+            dur = id(hunter_ctrlr).valve_run_duration_adjusted(vnr);
+            c_op_tot = id(hunter_ctrlr).total_cycle_time_enabled_valves();
+            c_op_rem = id(hunter_ctrlr).time_remaining_current_operation().value_or(0);
+            sprintf(text,"%s Zone %d, time left %u secs",states[hst_state], vnr+1 , secs);
+            av_perc = dur>0 ?(dur-secs)*100/dur:100;
+            c_perc = c_op_tot>0 ? (c_op_tot-c_op_rem)*100/c_op_tot : 0;
+        } else {
+            sprintf(text,"%s", states[hst_state]);
+        }
+        if (av_perc >= 0 && av_perc <= 100) {id(hunter_active_valve_percent).publish_state(av_perc);}
+        if (c_perc >= 0) {id(hunter_current_program_percent).publish_state(c_perc);}
+        return {text};
+    update_interval: never
+
+interval:
+  - interval: 5s
+    then:
+      if:
+        condition:
+          switch.is_on: hunter_main_switch
+        then:
+          - component.update: hunter_status
+
+script:
+  - id: run_zone
+    parameters:
+      my_zone_id: int
+    then:
+      - lambda: |-
+              int runmins = round(id(hunter_ctrlr).valve_run_duration(my_zone_id-1) / 60);
+              int remainmins = round(id(hunter_ctrlr).time_remaining_active_valve().value_or(runmins*60)/ 60)+1;
+              runmins = (remainmins<runmins ? remainmins : runmins);
+              id(hunterremote).startZone(my_zone_id, runmins);
+  - id: stop_zone
+    parameters:
+      my_zone_id: int
+    then:
+      - if:
+          condition:
+            - script.is_running: run_zone
+          then:
+            - script.stop: run_zone
+      - lambda: |-
+            id(hunterremote).stopZone(my_zone_id);
+  - id: start_program
+    parameters:
+      my_program: int
+    then:
+      - if:
+          condition:
+            - script.is_running: run_zone
+          then:
+            - script.stop: run_zone
+      - lambda:  |-
+         id(hunterremote).startProgram(my_program);
+
